@@ -451,6 +451,121 @@ describe("Policy hook — Layer 1: authority gate", () => {
       expect(result).toContain("unbound_execution: duplicate decision_ref");
       expect((mockWallet.signTypedData as jest.Mock).mock.calls.length).toBe(signCallsBefore);
     });
+
+    // ── FINDING-1 resolve-contract regressions (osr21 spec, 2026-08-24) ────────
+    // Every pre-spend policy failure must RESOLVE to a classified failure string
+    // (never reject the invoke() promise), leave signTypedData AND fetch
+    // untouched, and record the policy outcome exactly once — the outer catch
+    // must not duplicate the receipt already emitted inside checkPolicy
+    // (recordPolicyOutcome(null, …) is a no-op because checkPolicy throws before
+    // `decision` is assigned). On the pre-fix head these expectations fail with
+    // an unhandled rejection.
+
+    it("policy_denied RESOLVES to a classified string, records once", async () => {
+      mockEvaluate.mockResolvedValue(decision({ allowed: false, reason_codes: ["spend_limit"] }));
+      const result = await providerWith().sendUsdcGasless(mockWallet, {
+        to: MOCK_RECIPIENT,
+        amount: "5",
+      });
+      expect(result).toContain("policy_denied: spend_limit");
+      expect(mockWallet.signTypedData).not.toHaveBeenCalled();
+      expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
+      expect(mockRecord).toHaveBeenCalledTimes(1);
+      expect(mockRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "denied", error: "policy_denied: spend_limit" }),
+      );
+    });
+
+    it("policy_unverifiable (expired TTL) RESOLVES to a classified string, records once", async () => {
+      mockEvaluate.mockResolvedValue(decision({ expires_at_ms: Date.now() - 1000 }));
+      const result = await providerWith().sendUsdcGasless(mockWallet, {
+        to: MOCK_RECIPIENT,
+        amount: "5",
+      });
+      expect(result).toContain("policy_unverifiable");
+      expect(mockWallet.signTypedData).not.toHaveBeenCalled();
+      expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
+      expect(mockRecord).toHaveBeenCalledTimes(1);
+      expect(mockRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "expired", error: "policy_unverifiable" }),
+      );
+    });
+
+    it("context_drift RESOLVES to a classified string, records once", async () => {
+      mockEvaluate.mockResolvedValue(decision({ action_context_hash: "wrong-hash" }));
+      const result = await providerWith().sendUsdcGasless(mockWallet, {
+        to: MOCK_RECIPIENT,
+        amount: "5",
+      });
+      expect(result).toContain("context_drift");
+      expect(mockWallet.signTypedData).not.toHaveBeenCalled();
+      expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
+      expect(mockRecord).toHaveBeenCalledTimes(1);
+      expect(mockRecord).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: "context_drift", error: "context_drift" }),
+      );
+    });
+
+    it("unbound_execution (missing decision_ref) RESOLVES to a classified string, records once", async () => {
+      mockEvaluate.mockResolvedValue(decision({ decision_ref: "" }));
+      const result = await providerWith().sendUsdcGasless(mockWallet, {
+        to: MOCK_RECIPIENT,
+        amount: "5",
+      });
+      expect(result).toContain("unbound_execution: missing decision_ref");
+      expect(mockWallet.signTypedData).not.toHaveBeenCalled();
+      expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
+      expect(mockRecord).toHaveBeenCalledTimes(1);
+      expect(mockRecord).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "unauditable_outcome",
+          error: "unbound_execution: missing decision_ref",
+        }),
+      );
+    });
+
+    it("duplicate decision_ref RESOLVES to a classified string, records the failure once", async () => {
+      const ref = "gasless-replay-ref";
+      mockEvaluate.mockResolvedValue(decision({ decision_ref: ref }));
+      const p = providerWith();
+      // First call succeeds through the relay (records relay_confirmed).
+      await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
+      const recordCallsBefore = (mockRecord as jest.Mock).mock.calls.length;
+      const result = await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
+      expect(result).toContain("unbound_execution: duplicate decision_ref");
+      // Only the first call reached the signer.
+      expect(mockWallet.signTypedData).toHaveBeenCalledTimes(1);
+      // Exactly one record for the failure — the outer catch added no duplicate.
+      expect((mockRecord as jest.Mock).mock.calls.length).toBe(recordCallsBefore + 1);
+      expect(mockRecord).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          outcome: "denied",
+          error: "unbound_execution: duplicate decision_ref",
+        }),
+      );
+    });
+
+    // WHITE-BOX cleanup regression, kept distinct from the black-box conformance
+    // claims above (per osr21's spec): the five policy failures all occur inside
+    // checkPolicy BEFORE the ref reaches `pending`, so they do not exercise the
+    // outer finally. A genuine cleanup path is a post-gate failure AFTER
+    // checkPolicy succeeds — here getAddress() throws after checkPolicy and after
+    // consumed.add, so the ref IS in `pending` and the finally must release it.
+    // Asserted white-box against the private set, because retrying the same ref
+    // cannot distinguish "pending cleaned" from "pending leaked" (consumed is
+    // intentionally retained).
+    it("pending is released after a post-gate failure (white-box against the set)", async () => {
+      mockEvaluate.mockResolvedValue(decision({ decision_ref: "cleanup-ref" }));
+      mockWallet.getAddress = jest.fn().mockImplementation(() => {
+        throw new Error("getAddress boom");
+      });
+      const p = providerWith();
+      const result = await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
+      const white = p as unknown as { pending: Set<string>; consumed: Set<string> };
+      expect(result).toContain("getAddress boom");
+      expect(white.pending.has("cleanup-ref")).toBe(false);
+      expect(white.consumed.has("cleanup-ref")).toBe(true); // consumed intentionally retained
+    });
   });
 
   // ── batchPayUsdc: first authority step = ensureAllowance ─────────────────
