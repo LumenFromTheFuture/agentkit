@@ -340,10 +340,13 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
       // Fix 1 (caller): pending.add is inside checkPolicy.
-      // Fix 2: consumed.add is here, before signTypedData — signing is the first
-      // irreversible authority step (a signed EIP-3009 auth is spend-capable even
-      // if the relay is never called). The post-relay consumed.add has been removed.
-      if (ref) this.consumed.add(ref);
+      // Authority-bound decision (osr21 review, 2026-08-25): the ref is consumed
+      // only at the first irreversible authority step — the EIP-3009 signing
+      // below. Local preparation failures before that point (wallet capability
+      // check, getAddress, amount/nonce construction) create no spend-capable
+      // authorization, so the ref is NOT consumed and a retry may re-evaluate
+      // the policy. See the consumed.add immediately before `signTypedData`.
+      // `pending` still blocks concurrent reuse while preparation is in progress.
 
       const wp = walletProvider as EvmWalletProvider & {
         signTypedData?: (p: Record<string, unknown>) => Promise<Hex>;
@@ -368,6 +371,13 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
         Array.from(randomBytes)
           .map(b => b.toString(16).padStart(2, "0"))
           .join("")) as Hex;
+
+      // Authority-bound (osr21 review, 2026-08-25): signing is the first
+      // irreversible authority step — a signed EIP-3009 auth is spend-capable
+      // even if the relay is never called. All preparation above happens before
+      // this point, so a failure there does not consume the ref. The
+      // post-relay consumed.add has been removed.
+      if (ref) this.consumed.add(ref);
 
       let signature: Hex;
       try {

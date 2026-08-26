@@ -531,10 +531,12 @@ describe("Policy hook — Layer 1: authority gate", () => {
       // First call succeeds through the relay (records relay_confirmed).
       await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
       const recordCallsBefore = (mockRecord as jest.Mock).mock.calls.length;
+      const fetchCallsBefore = (global.fetch as jest.Mock).mock.calls.length;
       const result = await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
       expect(result).toContain("unbound_execution: duplicate decision_ref");
-      // Only the first call reached the signer.
+      // Only the first call reached the signer or the relay.
       expect(mockWallet.signTypedData).toHaveBeenCalledTimes(1);
+      expect((global.fetch as jest.Mock).mock.calls.length).toBe(fetchCallsBefore);
       // Exactly one record for the failure — the outer catch added no duplicate.
       expect((mockRecord as jest.Mock).mock.calls.length).toBe(recordCallsBefore + 1);
       expect(mockRecord).toHaveBeenLastCalledWith(
@@ -545,16 +547,25 @@ describe("Policy hook — Layer 1: authority gate", () => {
       );
     });
 
-    // WHITE-BOX cleanup regression, kept distinct from the black-box conformance
-    // claims above (per osr21's spec): the five policy failures all occur inside
-    // checkPolicy BEFORE the ref reaches `pending`, so they do not exercise the
-    // outer finally. A genuine cleanup path is a post-gate failure AFTER
-    // checkPolicy succeeds — here getAddress() throws after checkPolicy and after
-    // consumed.add, so the ref IS in `pending` and the finally must release it.
-    // Asserted white-box against the private set, because retrying the same ref
-    // cannot distinguish "pending cleaned" from "pending leaked" (consumed is
-    // intentionally retained).
-    it("pending is released after a post-gate failure (white-box against the set)", async () => {
+    // WHITE-BOX cleanup regressions (osr21 spec, 2026-08-25, authority-bound
+    // decision): consumed.add fires immediately before signTypedData, so a
+    // failure AFTER the authority boundary (signing) retains the ref, while a
+    // failure BEFORE it (getAddress) does not. Both clear `pending` in the
+    // outer finally. Asserted white-box against the private sets, because
+    // retrying the same ref cannot distinguish "pending cleaned" from
+    // "pending leaked" (consumed is intentionally retained in one case).
+    it("post-boundary: pending released + ref retained when signTypedData rejects", async () => {
+      mockEvaluate.mockResolvedValue(decision({ decision_ref: "cleanup-ref" }));
+      mockWallet.signTypedData = jest.fn().mockRejectedValue(new Error("sign boom"));
+      const p = providerWith();
+      const result = await p.sendUsdcGasless(mockWallet, { to: MOCK_RECIPIENT, amount: "5" });
+      const white = p as unknown as { pending: Set<string>; consumed: Set<string> };
+      expect(result).toContain("sign boom");
+      expect(white.pending.has("cleanup-ref")).toBe(false);
+      expect(white.consumed.has("cleanup-ref")).toBe(true); // signing = authority created
+    });
+
+    it("pre-boundary: pending released + ref NOT retained when getAddress throws", async () => {
       mockEvaluate.mockResolvedValue(decision({ decision_ref: "cleanup-ref" }));
       mockWallet.getAddress = jest.fn().mockImplementation(() => {
         throw new Error("getAddress boom");
@@ -564,7 +575,7 @@ describe("Policy hook — Layer 1: authority gate", () => {
       const white = p as unknown as { pending: Set<string>; consumed: Set<string> };
       expect(result).toContain("getAddress boom");
       expect(white.pending.has("cleanup-ref")).toBe(false);
-      expect(white.consumed.has("cleanup-ref")).toBe(true); // consumed intentionally retained
+      expect(white.consumed.has("cleanup-ref")).toBe(false); // no authority created
     });
   });
 
