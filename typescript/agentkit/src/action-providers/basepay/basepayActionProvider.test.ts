@@ -562,7 +562,7 @@ describe("Policy hook — Layer 1: authority gate", () => {
       const white = p as unknown as { pending: Set<string>; consumed: Set<string> };
       expect(result).toContain("sign boom");
       expect(white.pending.has("cleanup-ref")).toBe(false);
-      expect(white.consumed.has("cleanup-ref")).toBe(true); // signing = authority created
+      expect(white.consumed.has("cleanup-ref")).toBe(true); // signing was attempted; conservatively retain the consumed ref
     });
 
     it("pre-boundary: pending released + ref NOT retained when getAddress throws", async () => {

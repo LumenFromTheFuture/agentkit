@@ -503,6 +503,13 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
       // Fix 1 (caller): pending.add is inside checkPolicy.
+      // Single-attempt contract (osr21 review, 2026-08-26): the ref is
+      // consumed here, so any post-policy failure — including an unexpected
+      // hashing failure in the Fix 3 re-hash below, not only a genuine
+      // `context_drift` — requires a fresh decision on retry. Batch pay has
+      // an asynchronous re-hash between consumption and `ensureAllowance`, so
+      // the precise contract is "all post-policy failures require a fresh
+      // decision", not "no local-preparation window".
       if (ref) this.consumed.add(ref);
 
       // Fix 3: re-derive recipient_allocation_hash at the execution boundary,
