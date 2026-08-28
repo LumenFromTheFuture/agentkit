@@ -170,9 +170,9 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
   /**
    * checkPolicy evaluates the action context against the policy provider.
    *
-   * Fix 1: pending.add(ref) is done here, synchronously, before returning —
-   * so concurrent calls with the same decision_ref are blocked before any
-   * async work in the caller, closing the race window in the two-set pattern.
+   * pending.add(ref) happens here, synchronously, before returning — so
+   * concurrent calls with the same decision_ref are blocked before any async
+   * work in the caller, closing the race window in the two-set pattern.
    */
   private async recordPolicyOutcome(
     decision: PolicyDecision | null,
@@ -238,9 +238,8 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
       throw new Error("unbound_execution: duplicate decision_ref");
     }
 
-    // Fix 1: add to pending inside checkPolicy before returning.
-    // This ensures the concurrent-duplicate guard fires before any caller
-    // async work, not after checkPolicy returns.
+    // Add to pending inside checkPolicy before returning, so the
+    // concurrent-duplicate guard fires before any caller async work.
     this.pending.add(decision.decision_ref);
     return decision;
   }
@@ -275,7 +274,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     try {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
-      // Fix 1 (caller): pending.add is now inside checkPolicy; only consumed.add here.
+      // pending.add happens inside checkPolicy; only consumed.add happens here.
       if (ref) this.consumed.add(ref);
 
       const hash = await walletProvider.sendTransaction({
@@ -286,7 +285,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           args: [args.to as Hex, toAtomic(args.amount)],
         }),
       });
-      // Fix 5: classify on-chain revert as [failed], not [executed].
+      // Classify an on-chain revert as [failed], not [executed].
       const receipt = await walletProvider.waitForTransactionReceipt(hash);
       if ((receipt as { status?: string }).status === "reverted") {
         await this.recordPolicyOutcome(decision, "failed", { tx_hash: hash });
@@ -339,14 +338,14 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     try {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
-      // Fix 1 (caller): pending.add is inside checkPolicy.
-      // Authority-bound decision (osr21 review, 2026-08-25): the ref is consumed
-      // only at the first irreversible authority step — the EIP-3009 signing
-      // below. Local preparation failures before that point (wallet capability
-      // check, getAddress, amount/nonce construction) create no spend-capable
-      // authorization, so the ref is NOT consumed and a retry may re-evaluate
-      // the policy. See the consumed.add immediately before `signTypedData`.
-      // `pending` still blocks concurrent reuse while preparation is in progress.
+      // pending.add happens inside checkPolicy.
+      // Authority-bound: the ref is consumed only at the first irreversible
+      // authority step — the EIP-3009 signing below. Local preparation failures
+      // before that point (wallet capability check, getAddress, amount/nonce
+      // construction) create no spend-capable authorization, so the ref is NOT
+      // consumed and a retry may re-evaluate the policy. See the consumed.add
+      // immediately before `signTypedData`. `pending` still blocks concurrent
+      // reuse while preparation is in progress.
 
       const wp = walletProvider as EvmWalletProvider & {
         signTypedData?: (p: Record<string, unknown>) => Promise<Hex>;
@@ -372,11 +371,11 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           .map(b => b.toString(16).padStart(2, "0"))
           .join("")) as Hex;
 
-      // Authority-bound (osr21 review, 2026-08-25): signing is the first
-      // irreversible authority step — a signed EIP-3009 auth is spend-capable
-      // even if the relay is never called. All preparation above happens before
-      // this point, so a failure there does not consume the ref. The
-      // post-relay consumed.add has been removed.
+      // Authority-bound: signing is the first irreversible authority step — a
+      // signed EIP-3009 auth is spend-capable even if the relay is never
+      // called. All preparation above happens before this point, so a failure
+      // there does not consume the ref. Consumption happens immediately before
+      // signing; there is no post-relay consumption.
       if (ref) this.consumed.add(ref);
 
       let signature: Hex;
@@ -442,8 +441,9 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
         await this.recordPolicyOutcome(decision, "relay_confirmed", {
           tx_hash: data.txHash as Hex,
         });
-        // Fix 6: relay accepted the authorization and returned a tx hash, but chain
-        // confirmation is not awaited. Outcome is relay_confirmed, not executed.
+        // The relay accepted the authorization and returned a tx hash, but
+        // chain confirmation is not awaited. Outcome is relay_confirmed, not
+        // executed.
         return `Gaslessly sent ${args.amount} USDC to ${args.to} (relay paid gas) [relay_confirmed]\nTransaction: ${txLink(data.txHash as Hex)}`;
       } catch (e: unknown) {
         await this.recordPolicyOutcome(decision, "failed", {
@@ -452,11 +452,11 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
         return `Error calling BasePay relay: ${e instanceof Error ? e.message : String(e)}`;
       }
     } catch (e: unknown) {
-      // Fix FINDING-1: match the other four actions' outer catch. Pre-spend
-      // policy failures (deny / expired TTL / context drift / duplicate
-      // decision_ref) must RESOLVE to a classified failure string, not reject
-      // the invoke() promise. recordPolicyOutcome(null, ...) is a no-op, so
-      // outcomes already recorded inside checkPolicy are not double-recorded.
+      // Pre-spend policy failures (deny / expired TTL / context drift /
+      // duplicate decision_ref) must RESOLVE to a classified failure string,
+      // not reject the invoke() promise. recordPolicyOutcome(null, ...) is a
+      // no-op, so outcomes already recorded inside checkPolicy are not
+      // double-recorded.
       const message = e instanceof Error ? e.message : String(e);
       await this.recordPolicyOutcome(decision, this.classifyPolicyError(e), {
         error: message,
@@ -502,19 +502,13 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     try {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
-      // Fix 1 (caller): pending.add is inside checkPolicy.
-      // Single-attempt contract (osr21 review, 2026-08-26): the ref is
-      // consumed here, so any post-policy failure — including an unexpected
-      // hashing failure in the Fix 3 re-hash below, not only a genuine
-      // `context_drift` — requires a fresh decision on retry. Batch pay has
-      // an asynchronous re-hash between consumption and `ensureAllowance`, so
-      // the precise contract is "all post-policy failures require a fresh
-      // decision", not "no local-preparation window".
+      // Decision refs are single-use after policy acceptance. Any later failure,
+      // including allocation re-hashing, requires a fresh policy decision.
       if (ref) this.consumed.add(ref);
 
-      // Fix 3: re-derive recipient_allocation_hash at the execution boundary,
-      // before any allowance change, to close the TOCTOU window between
-      // policy evaluation and execution.
+      // Re-derive recipient_allocation_hash at the execution boundary, before
+      // any allowance change, to close the TOCTOU window between policy
+      // evaluation and execution.
       if (ctx.recipient_allocation_hash !== undefined) {
         const execHash = await recipientAllocationHash(
           args.recipients.map(r => ({ address: r.address, amount: toAtomic(r.amount) })),
@@ -533,7 +527,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           args: [USDC, args.recipients.map(r => r.address as Hex), amounts, args.memo],
         }),
       });
-      // Fix 5: classify on-chain revert as [failed].
+      // Classify an on-chain revert as [failed].
       const receipt = await walletProvider.waitForTransactionReceipt(hash);
       if ((receipt as { status?: string }).status === "reverted") {
         await this.recordPolicyOutcome(decision, "failed", { tx_hash: hash });
@@ -589,7 +583,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     try {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
-      // Fix 1 (caller): pending.add is inside checkPolicy.
+      // pending.add happens inside checkPolicy; only consumed.add happens here.
       if (ref) this.consumed.add(ref);
 
       const approveTx = await ensureAllowance(walletProvider, ESCROW_V2, amount);
@@ -601,7 +595,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           args: [USDC, args.payee as Hex, amount, BigInt(args.unlockAfterSeconds), args.memo],
         }),
       });
-      // Fix 5: classify on-chain revert as [failed].
+      // Classify an on-chain revert as [failed].
       const receipt = await walletProvider.waitForTransactionReceipt(hash);
       if ((receipt as { status?: string }).status === "reverted") {
         await this.recordPolicyOutcome(decision, "failed", { tx_hash: hash });
@@ -662,7 +656,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     try {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
-      // Fix 1 (caller): pending.add is inside checkPolicy.
+      // pending.add happens inside checkPolicy.
       // decision_ref scopes to subscription creation only; subsequent charge()
       // calls are a separate authority plane and do not inherit this ref.
       if (ref) this.consumed.add(ref);
@@ -676,7 +670,7 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           args: [USDC, args.payee as Hex, amount, BigInt(args.intervalSeconds), args.memo],
         }),
       });
-      // Fix 5: classify on-chain revert as [failed].
+      // Classify an on-chain revert as [failed].
       const receipt = await walletProvider.waitForTransactionReceipt(hash);
       if ((receipt as { status?: string }).status === "reverted") {
         await this.recordPolicyOutcome(decision, "failed", { tx_hash: hash });
