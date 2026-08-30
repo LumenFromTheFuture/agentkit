@@ -300,10 +300,10 @@ describe("BasePay Action Provider", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Policy hook: two-layer execution-boundary matrix (Fix 7)
+// Policy hook: two-layer execution-boundary matrix
 // ══════════════════════════════════════════════════════════════════════════════
 //
-// Layer 1 — Authority gate: assertions that fire BEFORE the first irreversible
+// Layer 1 — Authority gate: assertions that fire BEFORE the first authority
 //   operation. Tests assert the operation was NOT called on policy failure.
 //
 // Layer 2 — Settlement outcome: assertions that fire AFTER the chain/relay
@@ -452,14 +452,13 @@ describe("Policy hook — Layer 1: authority gate", () => {
       expect((mockWallet.signTypedData as jest.Mock).mock.calls.length).toBe(signCallsBefore);
     });
 
-    // ── FINDING-1 resolve-contract regressions (osr21 spec, 2026-08-24) ────────
+    // ── Gasless resolve-contract regressions ──────────────────────────────────
     // Every pre-spend policy failure must RESOLVE to a classified failure string
     // (never reject the invoke() promise), leave signTypedData AND fetch
     // untouched, and record the policy outcome exactly once — the outer catch
     // must not duplicate the receipt already emitted inside checkPolicy
     // (recordPolicyOutcome(null, …) is a no-op because checkPolicy throws before
-    // `decision` is assigned). On the pre-fix head these expectations fail with
-    // an unhandled rejection.
+    // `decision` is assigned).
 
     it("policy_denied RESOLVES to a classified string, records once", async () => {
       mockEvaluate.mockResolvedValue(decision({ allowed: false, reason_codes: ["spend_limit"] }));
@@ -547,13 +546,13 @@ describe("Policy hook — Layer 1: authority gate", () => {
       );
     });
 
-    // WHITE-BOX cleanup regressions (osr21 spec, 2026-08-25, authority-bound
-    // decision): consumed.add fires immediately before signTypedData, so a
-    // failure AFTER the authority boundary (signing) retains the ref, while a
-    // failure BEFORE it (getAddress) does not. Both clear `pending` in the
-    // outer finally. Asserted white-box against the private sets, because
-    // retrying the same ref cannot distinguish "pending cleaned" from
-    // "pending leaked" (consumed is intentionally retained in one case).
+    // WHITE-BOX cleanup regressions: consumed.add fires immediately before
+    // signTypedData, so a failure AFTER the authority boundary (signing)
+    // retains the ref, while a failure BEFORE it (getAddress) does not. Both
+    // clear `pending` in the outer finally. Asserted white-box against the
+    // private sets, because retrying the same ref cannot distinguish "pending
+    // cleaned" from "pending leaked" (consumed is intentionally retained in
+    // one case).
     it("post-boundary: pending released + ref retained when signTypedData rejects", async () => {
       mockEvaluate.mockResolvedValue(decision({ decision_ref: "cleanup-ref" }));
       mockWallet.signTypedData = jest.fn().mockRejectedValue(new Error("sign boom"));

@@ -168,11 +168,9 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
   }
 
   /**
-   * checkPolicy evaluates the action context against the policy provider.
-   *
-   * pending.add(ref) happens here, synchronously, before returning — so
-   * concurrent calls with the same decision_ref are blocked before any async
-   * work in the caller, closing the race window in the two-set pattern.
+   * recordPolicyOutcome persists a policy outcome as a best-effort audit
+   * receipt. It must never throw: receipt recording is a durability concern,
+   * not an authority gate, and must not block settlement.
    */
   private async recordPolicyOutcome(
     decision: PolicyDecision | null,
@@ -204,6 +202,15 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
     return "failed";
   }
 
+  /**
+   * checkPolicy evaluates the action context against the policy provider and
+   * returns the approved decision, or throws a classified error (policy_denied,
+   * policy_unverifiable, context_drift, unbound_execution) and records the
+   * outcome. The approved decision_ref is added to `pending` here,
+   * synchronously, before returning — so concurrent calls with the same
+   * decision_ref are blocked before any async work in the caller, closing the
+   * race window in the two-set pattern.
+   */
   private async checkPolicy(ctx: ActionContext): Promise<PolicyDecision | null> {
     if (!this.policyProvider) return null;
 
@@ -339,13 +346,14 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
       decision = await this.checkPolicy(ctx);
       ref = decision?.decision_ref ?? "";
       // pending.add happens inside checkPolicy.
-      // Authority-bound: the ref is consumed only at the first irreversible
-      // authority step — the EIP-3009 signing below. Local preparation failures
+      // Authority boundary: the ref is consumed only immediately before
+      // requesting the EIP-3009 signature. Local preparation failures
       // before that point (wallet capability check, getAddress, amount/nonce
       // construction) create no spend-capable authorization, so the ref is NOT
-      // consumed and a retry may re-evaluate the policy. See the consumed.add
-      // immediately before `signTypedData`. `pending` still blocks concurrent
-      // reuse while preparation is in progress.
+      // consumed and a retry may re-evaluate the policy. Once signing is
+      // attempted the ref is retained conservatively because the signing
+      // outcome may be ambiguous. `pending` still blocks concurrent reuse
+      // while preparation is in progress.
 
       const wp = walletProvider as EvmWalletProvider & {
         signTypedData?: (p: Record<string, unknown>) => Promise<Hex>;
@@ -371,11 +379,13 @@ export class BasePayActionProvider extends ActionProvider<EvmWalletProvider> {
           .map(b => b.toString(16).padStart(2, "0"))
           .join("")) as Hex;
 
-      // Authority-bound: signing is the first irreversible authority step — a
-      // signed EIP-3009 auth is spend-capable even if the relay is never
-      // called. All preparation above happens before this point, so a failure
-      // there does not consume the ref. Consumption happens immediately before
-      // signing; there is no post-relay consumption.
+      // Authority boundary: consume the ref immediately before requesting the
+      // EIP-3009 signature. Once signing is attempted, retain it conservatively
+      // because the signing outcome may be ambiguous — a rejected signTypedData
+      // proves only that signing was attempted, not that no signature escaped.
+      // The returned signature, if one is produced, is spend-capable. All
+      // preparation above happens before this point, so a failure there does
+      // not consume the ref; there is no post-relay consumption.
       if (ref) this.consumed.add(ref);
 
       let signature: Hex;
